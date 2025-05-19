@@ -1,0 +1,323 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Third-Person Car Game</title>
+  <style>
+    body { margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background: #222; }
+    canvas { border: 2px solid #444; }
+    #gameOver { display: none; position: absolute; color: #ff4444; font-size: 48px; font-family: Arial, sans-serif; text-shadow: 2px 2px 4px #000; }
+    #restartBtn { display: none; position: absolute; top: 60%; padding: 10px 20px; font-size: 24px; background: #28a745; color: white; border: none; cursor: pointer; font-family: Arial, sans-serif; border-radius: 5px; }
+    #restartBtn:hover { background: #218838; }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas" width="400" height="600"></canvas>
+  <div id="gameOver">Game Over!</div>
+  <button id="restartBtn">Restart</button>
+  <script>
+    // DOM elements with safety checks
+    const canvas = document.getElementById('gameCanvas');
+    const gameOverText = document.getElementById('gameOver');
+    const restartBtn = document.getElementById('restartBtn');
+
+    if (!canvas || !gameOverText || !restartBtn) {
+      console.error('DOM elements missing:', { canvas, gameOverText, restartBtn });
+      throw new Error('Required DOM elements not found');
+    }
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      console.error('Failed to get 2D context from canvas');
+      throw new Error('Canvas context not available');
+    }
+
+    // Game variables
+    const roadWidth = 300;
+    const laneWidth = roadWidth / 3; // 100px
+    const lanes = [50 + laneWidth / 2, 50 + laneWidth * 1.5, 50 + laneWidth * 2.5]; // [100, 200, 300]
+    let playerLane = 1;
+    let playerX = lanes[playerLane];
+    const playerY = canvas.height - 80;
+    const carWidth = 40;
+    const carHeight = 60;
+    const coneWidth = 20;
+    const coneHeight = 30;
+    let obstacles = [];
+    let speed = 5; // Initial speed
+    let maxSpeed = 10; // Initial cap until 1000s
+    const finalMaxSpeed = 13; // Final cap after 1000s
+    let score = 0;
+    let highScore = parseInt(localStorage.getItem('highScore')) || 0;
+    let gameOver = false;
+    let lastObstacleTime = 0;
+    let obstacleInterval = 1200;
+    const minObstacleInterval = 600;
+    const finalMinObstacleInterval = 500; // After speed reaches 13
+    const difficultyIncreaseInterval = 10000;
+    const speedIncrease = 0.1;
+    const speedIncreaseInterval = 5000;
+    let occupiedLanes = [];
+    let roadOffset = 0;
+
+    // Draw car (player or obstacle)
+    function drawCar(x, y, color, isPlayer) {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+      ctx.fillRect(x - carWidth / 2 + 5, y - carHeight / 2 + 5, carWidth, carHeight);
+      const gradient = ctx.createLinearGradient(x - carWidth / 2, y - carHeight / 2, x - carWidth / 2, y + carHeight / 2);
+      gradient.addColorStop(0, color);
+      gradient.addColorStop(1, color === 'red' ? '#a00' : '#00a');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(x - carWidth / 2, y - carHeight / 2, carWidth, carHeight - 15);
+      ctx.fillStyle = '#222';
+      ctx.fillRect(x - carWidth / 2 + 5, y - carHeight / 2 + 10, carWidth - 10, carHeight - 40);
+      if (isPlayer) {
+        ctx.fillStyle = 'yellow';
+        ctx.fillRect(x - carWidth / 2 + 5, y - carHeight / 2, 5, 3);
+        ctx.fillRect(x + carWidth / 2 - 10, y - carHeight / 2, 5, 3);
+      }
+      ctx.fillStyle = '#111';
+      ctx.beginPath();
+      ctx.arc(x - carWidth / 2 + 8, y + carHeight / 2 - 10, 5, 0, Math.PI * 2);
+      ctx.arc(x + carWidth / 2 - 8, y + carHeight / 2 - 10, 5, 0, Math.PI * 2);
+      ctx.arc(x - carWidth / 2 + 8, y - carHeight / 2 + 15, 5, 0, Math.PI * 2);
+      ctx.arc(x + carWidth / 2 - 8, y - carHeight / 2 + 15, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Draw traffic cone
+    function drawCone(x, y) {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+      ctx.fillRect(x - coneWidth / 2 + 3, y - coneHeight / 2 + 3, coneWidth, coneHeight);
+      ctx.fillStyle = 'orange';
+      ctx.beginPath();
+      ctx.moveTo(x, y - coneHeight / 2);
+      ctx.lineTo(x - coneWidth / 2, y + coneHeight / 2);
+      ctx.lineTo(x + coneWidth / 2, y + coneHeight / 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = 'white';
+      ctx.fillRect(x - coneWidth / 2 + 5, y + coneHeight / 2 - 10, coneWidth - 10, 5);
+    }
+
+    // Player car
+    const player = {
+      x: playerX,
+      y: playerY,
+      width: carWidth,
+      height: carHeight,
+      draw() {
+        drawCar(this.x, this.y, 'red', true);
+      }
+    };
+
+    // Obstacle class (car or cone)
+    class Obstacle {
+      constructor(lane, type) {
+        this.x = lanes[lane];
+        this.y = -30;
+        this.lane = lane;
+        this.type = type;
+        this.width = type === 'car' ? carWidth : coneWidth;
+        this.height = type === 'car' ? carHeight : coneHeight;
+        this.isStatic = type === 'cone';
+      }
+      draw() {
+        if (this.type === 'car') {
+          drawCar(this.x, this.y, 'blue', false);
+        } else {
+          drawCone(this.x, this.y);
+        }
+      }
+      update() {
+        if (!this.isStatic) {
+          this.y += speed;
+        }
+      }
+    }
+
+    // Smarter obstacle spawning with increasing difficulty
+    function spawnObstacle(timestamp) {
+      if (timestamp - lastObstacleTime < obstacleInterval) return;
+      const availableLanes = [0, 1, 2].filter(lane => !occupiedLanes.includes(lane));
+      if (availableLanes.length === 0) return;
+
+      const difficulty = Math.max(0, Math.floor(timestamp / difficultyIncreaseInterval));
+      let spawnCount = 1;
+      if (difficulty > 3 && Math.random() < 0.2 && availableLanes.length > 1) {
+        spawnCount = 2; // 20% chance for two obstacles after 30s
+      }
+
+      for (let i = 0; i < spawnCount && availableLanes.length > 0; i++) {
+        const laneIndex = Math.floor(Math.random() * availableLanes.length);
+        const lane = availableLanes[laneIndex];
+        const type = Math.random() < 0.5 ? 'cone' : 'car'; // 50% chance for cone
+        obstacles.push(new Obstacle(lane, type));
+        occupiedLanes.push(lane);
+        availableLanes.splice(laneIndex, 1);
+        setTimeout(() => {
+          occupiedLanes = occupiedLanes.filter(l => l !== lane);
+        }, obstacleInterval * 1.5);
+      }
+
+      lastObstacleTime = timestamp;
+    }
+
+    // Update difficulty, freezing until speed reaches 13
+    function updateDifficulty(timestamp) {
+      const difficulty = Math.max(0, Math.floor(timestamp / difficultyIncreaseInterval));
+      if (timestamp < 1150000) {
+        // Before 1150s (speed reaches 13), cap at minObstacleInterval = 600ms
+        obstacleInterval = Math.max(minObstacleInterval, 1200 - difficulty * 100);
+      } else {
+        // After 1150s, allow further decrease to 500ms
+        obstacleInterval = Math.max(finalMinObstacleInterval, 1200 - difficulty * 100);
+      }
+    }
+
+    // Input handling
+    document.addEventListener('keydown', (e) => {
+      if (gameOver) return;
+      if (e.key === 'ArrowLeft' && playerLane > 0) {
+        playerLane--;
+      } else if (e.key === 'ArrowRight' && playerLane < 2) {
+        playerLane++;
+      }
+      player.x = lanes[playerLane];
+    });
+
+    // Collision detection
+    function checkCollision() {
+      obstacles.forEach(obstacle => {
+        if (
+          player.x - player.width / 2 < obstacle.x + obstacle.width / 2 &&
+          player.x + player.width / 2 > obstacle.x - obstacle.width / 2 &&
+          player.y - player.height / 2 < obstacle.y + obstacle.height / 2 &&
+          player.y + player.height / 2 > obstacle.y - obstacle.height / 2
+        ) {
+          if (Math.floor(score) > highScore) {
+            highScore = Math.floor(score);
+            localStorage.setItem('highScore', highScore);
+          }
+          gameOver = true;
+          gameOverText.style.display = 'block';
+          restartBtn.style.display = 'block';
+        }
+      });
+    }
+
+    // Restart game
+    function restartGame() {
+      console.log('Restarting game');
+      playerLane = 1;
+      player.x = lanes[playerLane];
+      obstacles = [];
+      speed = 5; // Reset to initial speed
+      maxSpeed = 10; // Reset to initial cap
+      score = 0;
+      gameOver = false;
+      lastObstacleTime = 0;
+      obstacleInterval = 1200;
+      occupiedLanes = [];
+      roadOffset = 0;
+      gameOverText.style.display = 'none';
+      restartBtn.style.display = 'none';
+      requestAnimationFrame(gameLoop);
+    }
+
+    // Bind restart button
+    restartBtn.addEventListener('click', restartGame);
+
+    // Main game loop
+    function gameLoop(timestamp) {
+      if (gameOver) return;
+
+      // Update maxSpeed after 1000s
+      if (timestamp > 1000000) {
+        maxSpeed = finalMaxSpeed; // Increase to 13 after 1000s
+      }
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#87CEEB';
+      ctx.fillRect(0, 0, canvas.width, canvas.height / 2);
+      ctx.fillStyle = '#228B22';
+      ctx.fillRect(0, canvas.height / 2, canvas.width, canvas.height / 2);
+      ctx.fillStyle = '#333';
+      ctx.fillRect(50, 0, roadWidth, canvas.height);
+      ctx.strokeStyle = 'yellow';
+      ctx.lineWidth = 4;
+      ctx.setLineDash([20, 20]);
+      roadOffset = (roadOffset + speed) % 40;
+      ctx.beginPath();
+      ctx.moveTo(50 + laneWidth, roadOffset - 40);
+      ctx.lineTo(50 + laneWidth, canvas.height);
+      ctx.moveTo(50 + laneWidth * 2, roadOffset - 40);
+      ctx.lineTo(50 + laneWidth * 2, canvas.height);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      obstacles.forEach(obstacle => {
+        obstacle.update();
+        obstacle.draw();
+      });
+      spawnObstacle(timestamp);
+      updateDifficulty(timestamp);
+      player.draw();
+      obstacles = obstacles.filter(obstacle => obstacle.y < canvas.height + obstacle.height);
+      checkCollision();
+      score += 0.1;
+      ctx.fillStyle = 'white';
+      ctx.font = 'bold 24px Arial';
+      ctx.fillText(`Score: ${Math.floor(score)}`, 10, 30);
+      ctx.fillText(`High Score: ${highScore}`, 10, 60);
+      if (speed < maxSpeed && timestamp % speedIncreaseInterval < 16.67) {
+        speed += speedIncrease;
+      }
+      requestAnimationFrame(gameLoop);
+    }
+
+    // Initialize and start game
+    console.log('Starting game');
+    requestAnimationFrame(gameLoop);
+  </script>
+</body>
+</html>
